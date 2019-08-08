@@ -1,25 +1,27 @@
-FROM phasecorex/liquidsoap
+# build_hw: use 'intel-nuc' for amd64, rpi for arm32v6
+ARG build_hw=intel-nuc
 
-RUN apt-get update && \
+FROM balenalib/${build_hw}-debian:buster
+
+RUN useradd -ms /bin/bash -G cdrom worker && \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     icecast2 \
+    liquidsoap \
     icedax \
-    git \
-    nodejs \
-    npm \
-    socat \
     wodim \
-    nano
+    socat
 
 EXPOSE 8000
-WORKDIR /root
+WORKDIR /home/worker
+ENV CDROM_GROUP=24
 
 COPY etc /etc/
-COPY cd-player.liq cd-player.js package.json /root/
+COPY cd-player.liq cd-player.js package.json /home/worker/
 
-RUN mv /liquidsoap /usr/local/bin/ && npm install
+RUN apt-get install -y git npm nodejs && \
+    npm install && \
+    apt-get autoremove -y git npm && \
+    chown -R worker:worker /home/worker
 
-# Override entrypoint of base image
-ENTRYPOINT ["/usr/bin/env"]
-
-CMD service icecast2 start && node .
+CMD service icecast2 start && groupmod --gid ${CDROM_GROUP} cdrom && su -c "node ." worker

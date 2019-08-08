@@ -220,7 +220,7 @@ function play_cd(metadata, track_range, cbs) {
                      '|',
                      'socat',
                      '-',
-                     'UNIX:/var/run/cd-player.sock'];
+                     'UNIX:cd-player.sock'];
     let stream_delay = Date.now();
     let partial_line;
 
@@ -234,6 +234,7 @@ function play_cd(metadata, track_range, cbs) {
             cbs && cbs.playback_started && cbs.playback_started(stream_delay);
         },
         on_disconnect: function() {
+            // TODO: In case of an error we can come-up here with the cp_player process still alive
             cbs && cbs.playback_stopped && cbs.playback_stopped();
         }
     };
@@ -366,7 +367,7 @@ function get_duration(duration_string) {
 }
 
 function send_liquidsoap_command(command, cb) {
-    const options = [command, '|', 'socat', '-', 'UNIX:/var/run/liquidsoap.sock'];
+    const options = [command, '|', 'socat', '-', 'UNIX:liquidsoap.sock'];
     const child = child_process.spawn('echo', options, { shell: '/bin/bash' });
 
     child.stdout.on('data', (data) => {
@@ -529,7 +530,7 @@ function run_liquidsoap() {
 
     // Remove socket
     try {
-        fs.unlinkSync('/var/run/cd-player.sock');
+        fs.unlinkSync('cd-player.sock');
     } catch (err) {
         // All fine
     }
@@ -559,6 +560,19 @@ function run_liquidsoap() {
                     }
                 }
             }
+        }
+    });
+
+    liquidsoap.stderr.on('data', (data) => {
+        log(LIQUIDSOAP, STDERR, false, data);
+    });
+
+    liquidsoap.on('close', (code, signal) => {
+        log(LIQUIDSOAP, STDOUT, false, code, signal);
+
+        if (signal != 'SIGTERM') {
+            // This is unexpected
+            process.exit(1);
         }
     });
 }
