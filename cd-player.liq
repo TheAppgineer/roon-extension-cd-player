@@ -17,4 +17,5 @@ s = server.insert_metadata(id="metadata", s)
 output.icecast(%ogg(%flac(samplerate=44100,channels=2,compression=5,bits_per_sample=16)),
   mount='/roon-extension-cd-player', name='CD Player', format='audio/ogg',
   description='Extension that adds a CD player to your Roon system',
-  genre ='Misc', start=false, fallible=true, s)
+  host='127.0.0.1',
+  genre='Misc', start=false, fallible=true, s)

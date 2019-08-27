@@ -15,7 +15,9 @@
 "use strict";
 
 const ACTION_PLAY = 1;
-const ACTION_STOP = 2;
+const ACTION_PAUSE = 2;
+const ACTION_STOP = 3;
+const ACTION_EJECT = 4;
 
 const SELF       = 'player';
 const LIQUIDSOAP = 'Liquid';
@@ -37,16 +39,19 @@ var RoonApi          = require("node-roon-api"),
 var core = undefined;
 var cd_player = undefined;
 var mountpoint_cbs = undefined;
-var track_timer = undefined;
+var track_info = {};
 var terminate = false;
 var timestamps = {};
+var paused = false;
+var eject = false;
 
 var roon = new RoonApi({
     extension_id:        'com.theappgineer.cd-player',
     display_name:        'CD Player',
-    display_version:     '0.1.0',
+    display_version:     '0.2.0',
     publisher:           'The Appgineer',
     email:               'theappgineer@google.com',
+    website:             'https://community.roonlabs.com/t/roon-extension-cd-player/75941',
 
     core_paired: function(core_) {
         core = core_;
@@ -87,6 +92,13 @@ function makelayout(settings) {
         layout:    [],
         has_error: false
     };
+    // Use a group as a workaround for the ancient Settings API bug:
+    // https://community.roonlabs.com/t/settings-api-can-make-a-remote-crash/35899
+    let group = {
+        type:  "group",
+        title: `Tune in at: http://${get_ip()}:8000/roon-extension-cd-player`,
+        items: []
+    };
     let actions = {
         type:    "dropdown",
         title:   "Action",
@@ -96,19 +108,26 @@ function makelayout(settings) {
         setting: "action"
     };
 
-    l.layout.push({
+    group.items.push({
         type:    "zone",
         title:   "Auto-Tune Zone",
         setting: "zone"
     });
 
     if (cd_player) {
+        if (paused) {
+            actions.values.push({ title: "Play", value: ACTION_PLAY });
+        } else {
+            actions.values.push({ title: "Pause", value: ACTION_PAUSE });
+        }
         actions.values.push({ title: "Stop", value: ACTION_STOP });
     } else {
         actions.values.push({ title: "Play", value: ACTION_PLAY });
     }
 
-    l.layout.push(actions);
+    actions.values.push({ title: "Eject", value: ACTION_EJECT });
+
+    group.items.push(actions);
 
     if (settings.action == ACTION_PLAY) {
         const start_track = {
@@ -127,8 +146,12 @@ function makelayout(settings) {
             l.has_error = true;
         }
 
-        l.layout.push(start_track);
+        if (cd_player === undefined) {
+            group.items.push(start_track);
+        }
     }
+
+    l.layout.push(group);
 
     return l;
 }
@@ -138,46 +161,92 @@ function perform_action(settings) {
 
     switch (settings.action) {
         case ACTION_PLAY:
-            query_cd((metadata) => {
-                let track_range;
+            if (paused) {
+                send_liquidsoap_command('CD_Player.start');
+            } else {
+                get_track_count((metadata) => {
+                    let track_range;
 
-                // Input clipping
-                if (start_track > metadata.total_tracks) {
-                    start_track = metadata.total_tracks;
-                } else if (start_track < 1) {
-                    start_track = 1;
-                }
-
-                if (start_track == metadata.total_tracks) {
-                    track_range = `${start_track}`;
-                } else {
-                    track_range = `${start_track}+${metadata.total_tracks}`;
-                }
-
-                play_cd(metadata, track_range, {
-                    playback_started: function(stream_delay) {
-                        auto_tune(settings.zone);
-                        track_track(metadata, start_track - 1, stream_delay);
-                    },
-                    playback_stopped: function() {
-                        auto_stop(settings.zone);
+                    // Input clipping
+                    if (start_track > metadata.total_tracks) {
+                        start_track = metadata.total_tracks;
+                    } else if (start_track < 1) {
+                        start_track = 1;
                     }
+
+                    if (start_track == metadata.total_tracks) {
+                        track_range = `${start_track}`;
+                    } else {
+                        track_range = `${start_track}+${metadata.total_tracks}`;
+                    }
+
+                    play_cd(metadata, track_range, {
+                        playback_started: function(stream_delay) {
+                            auto_tune(settings.zone);
+                            track_info.stream_delay = stream_delay;
+                            track_track(metadata, start_track - 1, stream_delay);
+                        },
+                        playback_paused: function() {
+                            const offset = track_info.stream_delay - track_info.elapsed;
+
+                            if (settings.zone) {
+                                core.services.RoonApiTransport.control(settings.zone, 'play');
+                            }
+
+                            track_track(metadata, track_info.index, offset);
+                        },
+                        playback_stopped: function() {
+                            auto_stop(settings.zone);
+
+                            if (eject) {
+                                eject_drive();
+                                eject = false;
+                            }
+                        }
+                    });
                 });
-            });
+            }
+            break;
+        case ACTION_PAUSE:
+            send_liquidsoap_command('CD_Player.stop');
+            paused = true;
             break;
         case ACTION_STOP:
             if (cd_player) {
+                paused = false;
+
                 // Killing the process will trigger the other actions
                 process.kill(-cd_player.pid);
+            }
+            break;
+        case ACTION_EJECT:
+            if (cd_player) {
+                paused = false;
+
+                // Killing the process will trigger the other actions
+                process.kill(-cd_player.pid);
+                eject = true;
+            } else {
+                eject_drive();
             }
             break;
     }
 }
 
-function query_cd(cb) {
+function get_track_count(cb) {
     // Use wodim with -toc option to get the number of tracks
     // Closes tray in the process, if necessary
-    const child = child_process.spawn('wodim', ['dev=/dev/cdrom', '-toc']);
+    wodim('-toc', cb);
+    svc_status.set_status('Reading Table of Contents...', false);
+}
+
+function eject_drive() {
+    wodim('-eject');
+    svc_status.set_status('Drive ejected', false);
+}
+
+function wodim(command, cb) {
+    const child = child_process.spawn('wodim', ['dev=/dev/cdrom', command]);
     let metadata = {};
 
     child.stdout.on('data', (data) => {
@@ -226,12 +295,17 @@ function play_cd(metadata, track_range, cbs) {
 
     mountpoint_cbs = {
         on_connect: function() {
-            stream_delay = Date.now() - stream_delay;
+            if (paused) {
+                paused = false;
+                cbs && cbs.playback_paused && cbs.playback_paused();
+            } else {
+                stream_delay = Date.now() - stream_delay;
 
-            log(SELF, STDOUT, false, 'Streaming Delay:', stream_delay);
-            log(SELF, STDOUT, false, metadata);
+                log(SELF, STDOUT, false, 'Streaming Delay:', stream_delay);
+                log(SELF, STDOUT, false, metadata);
 
-            cbs && cbs.playback_started && cbs.playback_started(stream_delay);
+                cbs && cbs.playback_started && cbs.playback_started(stream_delay);
+            }
         },
         on_disconnect: function() {
             // TODO: In case of an error we can come-up here with the cp_player process still alive
@@ -374,11 +448,15 @@ function send_liquidsoap_command(command, cb) {
         const lines = data.toString().trim().split('\n');
 
         for (let i = 0; i < lines.length; i++) {
+            let response = lines[i].trim();
+
             log(SOCAT, STDOUT, i, lines[i]);
 
-            switch(lines[i].trim()) {
+            switch(response) {
                 case 'OK':
-                    cb && cb();
+                case 'off':
+                case 'on':
+                    cb && cb(response);
                     break;
             }
         }
@@ -406,16 +484,17 @@ function auto_tune(zone) {
 function get_ip() {
     const os = require('os');
     let ifaces = os.networkInterfaces();
+    let ip_address;
 
     for (const ifname in ifaces) {
         ifaces[ifname].forEach(function (iface) {
             if (iface.family == 'IPv4' && !iface.internal) {
-                return iface.address;
+                ip_address = iface.address;
             }
         });
     }
 
-    return undefined;
+    return ip_address;
 }
 
 function track_track(metadata, track_index, offset) {
@@ -428,7 +507,9 @@ function track_track(metadata, track_index, offset) {
         }
 
         if (track_index + 1 < metadata.total_tracks) {
-            track_timer = setTimeout(track_track, duration, metadata, track_index + 1);
+            track_info.timeout = setTimeout(track_track, duration, metadata, track_index + 1);
+            track_info.index = track_index;
+            track_info.start_time = Date.now();
         }
 
         status_string += `\n${track_index + 1}: ${metadata.tracks[track_index].title}`;
@@ -442,12 +523,17 @@ function auto_stop(zone) {
         core.services.RoonApiTransport.control(zone, 'stop');
     }
 
-    if (track_timer) {
-        clearTimeout(track_timer);
-        track_timer = undefined;
+    if (track_info.timeout) {
+        clearTimeout(track_info.timeout);
+        track_info.timeout = undefined;
     }
 
-    svc_status.set_status('Playback stopped', false);
+    if (paused) {
+        svc_status.set_status('Playback paused', false);
+        track_info.elapsed = Date.now() - track_info.start_time;
+    } else {
+        svc_status.set_status('Playback stopped', false);
+    }
 }
 
 function refresh_browse(opts, path, cb) {

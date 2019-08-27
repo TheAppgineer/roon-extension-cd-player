@@ -5,7 +5,7 @@ FROM balenalib/${build_hw}-debian:buster
 
 RUN useradd -ms /bin/bash -G cdrom worker && \
     apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     icecast2 \
     liquidsoap \
     icedax \
@@ -19,7 +19,7 @@ ENV CDROM_GROUP=24
 COPY etc /etc/
 COPY cd-player.liq cd-player.js package.json /home/worker/
 
-RUN apt-get install -y git npm nodejs && \
+RUN apt-get install -y --no-install-recommends git npm nodejs && \
     npm install && \
     apt-get autoremove -y git npm && \
     chown -R worker:worker /home/worker
